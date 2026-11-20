@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -31,6 +32,7 @@ type Server struct {
 	ServerConfig   ssh.ServerConfig
 	Socket         net.Listener
 	AuthorizedKeys map[string]bool
+	AuthPassword   string
 	stop           chan bool
 	done           chan bool
 }
@@ -159,6 +161,26 @@ func (s *Server) AddAuthorizedKeys(keyData []byte) {
 		}
 		s.AuthorizedKeys[string(newKey.Marshal())] = true
 	}
+}
+
+// SetAuthPassword enables password authentication with the given
+// password (from the config directory's "password" file, as in the
+// sshdog_ios fork).  A trailing CR/LF from the file is not part of
+// the password.
+func (s *Server) SetAuthPassword(password []byte) {
+	pw := strings.TrimRight(string(password), "\r\n")
+	if pw != "" {
+		s.AuthPassword = pw
+		s.ServerConfig.PasswordCallback = s.VerifyPassword
+	}
+}
+
+func (s *Server) VerifyPassword(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+	if s.AuthPassword == "" || s.AuthPassword != string(password) {
+		dbg.Debug("Password incorrect!")
+		return nil, fmt.Errorf("Password incorrect.")
+	}
+	return &ssh.Permissions{}, nil
 }
 
 func (s *Server) VerifyPublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {

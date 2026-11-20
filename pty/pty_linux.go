@@ -89,6 +89,12 @@ func attach_pty(tty *os.File, cmd *exec.Cmd) error {
 	}
 	cmd.SysProcAttr.Setsid = true
 	cmd.SysProcAttr.Setctty = true
-	cmd.SysProcAttr.Ctty = int(tty.Fd())
+	// Ctty is the file descriptor number *in the child process*,
+	// where AttachPty wires the tty to stdin/stdout/stderr — so it
+	// must be 0.  Upstream passed the parent's fd number here, which
+	// made every PTY session fail to start (child ioctl on a
+	// nonexistent fd) while the server misleadingly logged a clean
+	// "Finished execution."
+	cmd.SysProcAttr.Ctty = 0
 	return nil
 }

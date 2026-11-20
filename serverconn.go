@@ -27,7 +27,7 @@ import (
 	"sync"
 
 	"github.com/google/shlex"
-	"github.com/matir/sshdog/pty"
+	"github.com/Matir/sshdog/pty"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -111,15 +111,33 @@ type ExecRequest struct {
 	Cmd string
 }
 
+// shellExe picks the shell to run sessions and commands with, as in
+// the sshdog_ios fork: the SSHDOG_SHELL environment variable wins
+// when it names an existing file (e.g. Termux's $PREFIX/bin/bash,
+// since Android has no /bin/sh); otherwise the platform default.
+func shellExe() string {
+	if shell := os.Getenv("SSHDOG_SHELL"); shell != "" {
+		if _, err := os.Stat(shell); err == nil {
+			return shell
+		}
+	}
+	switch runtime.GOOS {
+	case "windows":
+		return "C:\\windows\\system32\\cmd.exe"
+	default:
+		return "/bin/sh"
+	}
+}
+
 func defaultShell() []string {
 	switch runtime.GOOS {
 	case "windows":
 		return []string{
-			"C:\\windows\\system32\\cmd.exe",
+			shellExe(),
 			"/Q",
 		}
 	default:
-		return []string{"/bin/sh"}
+		return []string{shellExe()}
 	}
 }
 
@@ -127,13 +145,13 @@ func commandWithShell(command string) []string {
 	switch runtime.GOOS {
 	case "windows":
 		return []string{
-			"C:\\windows\\system32\\cmd.exe",
+			shellExe(),
 			"/C",
 			command,
 		}
 	default:
 		return []string{
-			"/bin/sh",
+			shellExe(),
 			"-c",
 			command,
 		}
@@ -259,6 +277,12 @@ func (conn *ServerConn) ExecuteForChannel(shellCmd []string, ch ssh.Channel) uin
 	if errors.As(err, &exerr) {
 		dbg.Debug("Finished execution with error: %v", err)
 		return uint32(exerr.ExitCode())
+	} else if err != nil {
+		// Not an exit error: the process never ran (missing shell,
+		// bad controlling tty, ...).  Say so, instead of upstream's
+		// misleading clean "Finished execution."
+		dbg.Debug("Error executing %v: %v", shellCmd, err)
+		return 1
 	} else {
 		dbg.Debug("Finished execution.")
 		return 0

@@ -17,11 +17,12 @@ package main
 
 import (
 	"fmt"
-	"github.com/GeertJohan/go.rice"
-	"github.com/matir/sshdog/daemon"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/Matir/sshdog/daemon"
 )
 
 type Debugger bool
@@ -35,8 +36,28 @@ func (d Debugger) Debug(format string, args ...interface{}) {
 
 var dbg Debugger = true
 
+// configBox reads configuration from a plain directory on disk.
+//
+// This replaces go.rice: rice's init() inspects the running executable
+// as an appended zip (via go.zipexe/debug-elf) and crashes with a nil
+// pointer dereference on Android before main() even runs.  Reading a
+// real directory needs no such tricks and works everywhere.
+type configBox struct{ dir string }
+
+func (b *configBox) Bytes(name string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(b.dir, name))
+}
+
+func (b *configBox) String(name string) (string, error) {
+	data, err := b.Bytes(name)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 // Lookup the port number
-func getPort(box *rice.Box) int16 {
+func getPort(box *configBox) int16 {
 	if len(os.Args) > 1 {
 		if port, err := strconv.Atoi(os.Args[1]); err != nil {
 			dbg.Debug("Error parsing %s as port: %v", os.Args[1], err)
@@ -56,22 +77,22 @@ func getPort(box *rice.Box) int16 {
 }
 
 // Just check if a file exists
-func fileExists(box *rice.Box, name string) bool {
+func fileExists(box *configBox, name string) bool {
 	_, err := box.Bytes(name)
 	return err == nil
 }
 
 // Should we daemonize?
-func shouldDaemonize(box *rice.Box) bool {
+func shouldDaemonize(box *configBox) bool {
 	return fileExists(box, "daemon")
 }
 
 // Should we be silent?
-func beQuiet(box *rice.Box) bool {
+func beQuiet(box *configBox) bool {
 	return fileExists(box, "quiet")
 }
 
-var mainBox *rice.Box
+var mainBox *configBox
 
 func main() {
 	mainBox = mustFindBox()
@@ -92,21 +113,27 @@ func main() {
 	}
 }
 
-func mustFindBox() *rice.Box {
-	// Overloading name 'rice' due to bug in rice to be fixed in 2.0:
-	// https://github.com/GeertJohan/go.rice/issues/58
-	rice := &rice.Config{
-		LocateOrder: []rice.LocateMethod{
-			rice.LocateAppended,
-			rice.LocateEmbedded,
-			rice.LocateWorkingDirectory,
-		},
+func mustFindBox() *configBox {
+	// Search order: $SSHDOG_CONFIG_DIR, ./config next to the
+	// executable, then ./config in the working directory.
+	candidates := []string{}
+	if dir := os.Getenv("SSHDOG_CONFIG_DIR"); dir != "" {
+		candidates = append(candidates, dir)
 	}
-	if box, err := rice.FindBox("config"); err != nil {
-		panic(err)
-	} else {
-		return box
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(filepath.Dir(exe), "config"))
 	}
+	candidates = append(candidates, "config")
+	for _, dir := range candidates {
+		if st, err := os.Stat(dir); err == nil && st.IsDir() {
+			dbg.Debug("Using config directory: %s", dir)
+			return &configBox{dir: dir}
+		}
+	}
+	dbg.Debug("No config directory found (looked in: %v); "+
+		"only defaults will apply.", candidates)
+	return &configBox{dir: candidates[len(candidates)-1]}
 }
 
 // Actually run the implementation of the daemon
@@ -130,11 +157,26 @@ func daemonStart() (waitFunc func(), stopFunc func()) {
 		}
 	}
 
+	// Password auth, as in the sshdog_ios fork: when a file named
+	// "password" exists in the config directory, its contents are the
+	// login password.  May be combined with authorized_keys.
+	authSet := false
+	if passwordData, err := mainBox.Bytes("password"); err == nil {
+		dbg.Debug("Setting auth password.")
+		server.SetAuthPassword(passwordData)
+		authSet = true
+	}
 	if authData, err := mainBox.Bytes("authorized_keys"); err == nil {
 		dbg.Debug("Adding authorized_keys.")
 		server.AddAuthorizedKeys(authData)
-	} else {
-		dbg.Debug("No authorized keys found: %v", err)
+		authSet = true
+	}
+	if !authSet {
+		// Unlike the iOS fork (which serves with no auth in this
+		// case), refuse: an unauthenticated SSH server is never the
+		// right default.
+		dbg.Debug("Neither password nor authorized_keys was " +
+			"configured. Refusing to serve without authentication.")
 		return
 	}
 	server.ListenAndServe(getPort(mainBox))
